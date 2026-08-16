@@ -1,0 +1,13 @@
+dist/
+dist/**
+build/
+build/**
+downloads/
+downloads/**
+cookies/
+cookies/**
+__pycache__/
+*.pyc
+*.exe
+*.spec
+.git/
