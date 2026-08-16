@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: videograb-pro
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 5000
