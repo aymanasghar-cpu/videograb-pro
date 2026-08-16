@@ -229,8 +229,10 @@ def build_ydl_args(url, fmt, output_path, use_cookies=False):
             "--extractor-args", "youtube:player_client=android_embedded,android,ios,mweb",
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         ]
-    elif platform in ("tiktok", "instagram", "twitter", "facebook"):
-        args += ["--impersonate", "chrome"]
+    else:
+        args += [
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        ]
 
     if platform == "tiktok":
         args += [
@@ -468,8 +470,10 @@ def get_info():
             "--extractor-args", "youtube:player_client=android_embedded,android,ios,mweb",
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         ]
-    elif platform in ("tiktok", "instagram", "twitter", "facebook"):
-        cmd += ["--impersonate", "chrome"]
+    else:
+        cmd += [
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ]
 
     if platform == "tiktok":
         cmd += ["--extractor-args", "tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com"]
