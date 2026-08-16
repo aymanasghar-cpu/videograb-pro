@@ -463,8 +463,14 @@ def get_info():
             pass
 
     cmd = get_yt_dlp_cmd() + ["--dump-json", "--no-playlist"]
-    if platform in ("tiktok", "instagram", "twitter", "facebook"):
+    if "youtube.com" in url.lower() or "youtu.be" in url.lower():
+        cmd += [
+            "--extractor-args", "youtube:player_client=android_embedded,android,ios,mweb",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        ]
+    elif platform in ("tiktok", "instagram", "twitter", "facebook"):
         cmd += ["--impersonate", "chrome"]
+
     if platform == "tiktok":
         cmd += ["--extractor-args", "tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com"]
     if platform == "instagram":
@@ -486,6 +492,21 @@ def get_info():
             timeout=15
         )
         if proc.returncode != 0:
+            # YouTube oEmbed fallback if yt-dlp metadata fetch gets bot challenge
+            if "youtube.com" in url.lower() or "youtu.be" in url.lower():
+                try:
+                    oembed = requests.get(f"https://www.youtube.com/oembed?url={url}&format=json", timeout=6).json()
+                    return jsonify({
+                        "title": oembed.get("title", "YouTube Video"),
+                        "thumbnail": oembed.get("thumbnail_url", ""),
+                        "duration": "HD Video",
+                        "size_mb": None,
+                        "uploader": oembed.get("author_name", "YouTube"),
+                        "platform": "youtube"
+                    })
+                except Exception:
+                    pass
+
             err_msg = proc.stderr or "Could not fetch video info."
             if "ERROR:" in err_msg:
                 err_msg = err_msg.split("ERROR:")[-1].strip()
