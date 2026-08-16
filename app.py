@@ -152,6 +152,63 @@ def download_tiktok_direct(task_id, idx, url, fmt, output_path):
         return False, str(e)
 
 
+def download_youtube_direct(task_id, idx, url, fmt, output_path):
+    """Direct stream fallback for YouTube when cloud datacenter IP encounters bot challenge."""
+    try:
+        api_endpoints = [
+            "https://api.cobalt.tools/api/json",
+            "https://co.wuk.sh/api/json",
+            "https://cobalt-backend.canine.tools/"
+        ]
+        payload = {
+            "url": url,
+            "vQuality": "1080" if fmt in ("1080", "best") else ("720" if fmt == "720" else "720"),
+            "isAudioOnly": True if fmt == "mp3" else False,
+            "aFormat": "mp3" if fmt == "mp3" else "best"
+        }
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        for api in api_endpoints:
+            try:
+                r = requests.post(api, json=payload, headers=headers, timeout=12)
+                if r.status_code == 200:
+                    data = r.json()
+                    stream_url = data.get("url")
+                    filename = data.get("filename") or f"youtube_{int(time.time())}.mp4"
+                    if stream_url:
+                        dest_file = output_path / filename
+                        resp = requests.get(stream_url, stream=True, timeout=30)
+                        if resp.status_code == 200:
+                            total_bytes = int(resp.headers.get("content-length", 0))
+                            if total_bytes > 0:
+                                tasks[task_id]["results"][idx]["total_size"] = f"{total_bytes / (1024 * 1024):.2f}MB"
+                            downloaded_bytes = 0
+                            tasks[task_id]["results"][idx]["filename"] = filename
+                            with open(dest_file, "wb") as f:
+                                for chunk in resp.iter_content(chunk_size=256 * 1024):
+                                    if tasks[task_id].get("status") == "stopped":
+                                        f.close()
+                                        dest_file.unlink(missing_ok=True)
+                                        return True, "Stopped"
+                                    if chunk:
+                                        f.write(chunk)
+                                        downloaded_bytes += len(chunk)
+                                        if total_bytes > 0:
+                                            pct = round((downloaded_bytes / total_bytes) * 100, 1)
+                                            tasks[task_id]["results"][idx]["progress"] = pct
+                            tasks[task_id]["results"][idx]["status"] = "done"
+                            tasks[task_id]["results"][idx]["progress"] = 100
+                            return True, "Success"
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False, "Direct stream fallback failed"
+
+
 def build_ydl_args(url, fmt, output_path, use_cookies=False):
     """Build yt-dlp argument list with platform-specific flags and speed optimisations."""
     platform = detect_platform(url)
@@ -167,7 +224,12 @@ def build_ydl_args(url, fmt, output_path, use_cookies=False):
     ]
 
     # Platform-specific flags
-    if platform in ("tiktok", "instagram", "twitter", "facebook"):
+    if "youtube.com" in url.lower() or "youtu.be" in url.lower():
+        args += [
+            "--extractor-args", "youtube:player_client=android_embedded,android,ios,mweb",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        ]
+    elif platform in ("tiktok", "instagram", "twitter", "facebook"):
         args += ["--impersonate", "chrome"]
 
     if platform == "tiktok":
@@ -273,8 +335,14 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
             tasks[task_id]["results"][idx]["status"] = "done"
             tasks[task_id]["results"][idx]["progress"] = 100
         else:
+            err_text = "\n".join(output_lines[-6:])
+            # If YouTube bot error on datacenter IP, attempt fallback
+            if ("Sign in to confirm" in err_text or "bot" in err_text.lower()) and ("youtube.com" in url.lower() or "youtu.be" in url.lower()):
+                success, msg = download_youtube_direct(task_id, idx, url, fmt, save_dir)
+                if success:
+                    return
             tasks[task_id]["results"][idx]["status"] = "failed"
-            tasks[task_id]["results"][idx]["error"] = "\n".join(output_lines[-5:])
+            tasks[task_id]["results"][idx]["error"] = err_text
 
     except Exception as e:
         if tasks[task_id].get("status") != "stopped":
