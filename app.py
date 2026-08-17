@@ -156,14 +156,10 @@ def download_tiktok_direct(task_id, idx, url, fmt, output_path):
 
 def _extract_youtube_id(url):
     """Extract YouTube video ID from various URL formats."""
-    import urllib.parse
-    parsed = urllib.parse.urlparse(url)
-    if "youtu.be" in parsed.hostname:
-        return parsed.path.lstrip("/").split("/")[0]
-    if "youtube.com" in parsed.hostname:
-        qs = urllib.parse.parse_qs(parsed.query)
-        return qs.get("v", [None])[0]
-    return None
+    if not url:
+        return None
+    m = re.search(r'(?:v=|\/|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})', url)
+    return m.group(1) if m else None
 
 
 def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expected_total_bytes=0):
@@ -189,11 +185,10 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expecte
         last_pct = 0.0  # Never allow progress bar to go backwards
 
         # Adaptive estimation for chunked streams without content-length
-        # Start generous to avoid constant resets
         estimated_total = total_bytes if total_bytes > 0 else max(20 * 1024 * 1024, 1)
 
         with open(dest_file, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=512 * 1024):  # 512KB chunks for smooth & rapid updates
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunks for ultra-fast throughput
                 if tasks[task_id].get("status") == "stopped":
                     f.close()
                     dest_file.unlink(missing_ok=True)
@@ -214,9 +209,8 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expecte
                         tasks[task_id]["results"][idx]["downloaded_size"] = f"{dl_mb:.1f} MB"
 
                         if total_bytes > 0:
-                            # Exact content-length available
                             pct = min(round((downloaded_bytes / total_bytes) * 100, 1), 99.9)
-                            pct = max(pct, last_pct)  # Never go backwards
+                            pct = max(pct, last_pct)
                             tasks[task_id]["results"][idx]["progress"] = pct
                             last_pct = pct
                             if speed_val > 0:
@@ -226,21 +220,17 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expecte
                                 secs = int(rem_secs % 60)
                                 tasks[task_id]["results"][idx]["eta"] = f"{mins:02d}:{secs:02d}"
                         else:
-                            # Chunked stream: grow estimated_total only when near the limit
                             if downloaded_bytes > estimated_total * 0.88:
                                 estimated_total = int(downloaded_bytes * 1.30)
-                            # Smooth monotonic progress capped at 95%
                             raw_pct = round((downloaded_bytes / estimated_total) * 95, 1)
-                            pct = max(raw_pct, last_pct)  # Never go backwards
+                            pct = max(raw_pct, last_pct)
                             pct = min(pct, 95.0)
                             tasks[task_id]["results"][idx]["progress"] = pct
                             last_pct = pct
                             tasks[task_id]["results"][idx]["total_size"] = f"~{estimated_total / (1024 * 1024):.0f} MB"
-                            # ETA for chunked streams using overall speed
                             total_elapsed = now - start_time
                             if total_elapsed > 0 and downloaded_bytes > 0:
                                 avg_speed_bytes = downloaded_bytes / total_elapsed
-                                # Estimate remaining as difference from current estimated total
                                 rem_bytes_est = max(estimated_total - downloaded_bytes, 0)
                                 if avg_speed_bytes > 0:
                                     rem_secs = rem_bytes_est / avg_speed_bytes
@@ -265,6 +255,7 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expecte
 
 def download_youtube_direct(task_id, idx, url, fmt, output_path):
     """Fast direct YouTube downloader fallback for datacenter environments."""
+    import urllib.parse
     video_id = _extract_youtube_id(url)
     if not video_id:
         return False, "Could not extract YouTube video ID"
@@ -276,7 +267,9 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
 
     try:
         format_code = "mp3" if want_audio_only else ("1080" if fmt in ("1080", "best") else "720")
-        api_url = f"https://loader.to/ajax/download.php?format={format_code}&url={url}"
+        clean_url = f"https://www.youtube.com/watch?v={video_id}"
+        encoded_url = urllib.parse.quote(clean_url, safe="")
+        api_url = f"https://loader.to/ajax/download.php?format={format_code}&url={encoded_url}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://en.loader.to/"
@@ -294,7 +287,7 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
                 prog_url = data.get("progress_url")
                 if prog_url:
                     for _ in range(40):
-                        time.sleep(0.4)
+                        time.sleep(0.35)
                         if tasks[task_id].get("status") == "stopped":
                             return True, "Stopped"
                         tasks[task_id]["results"][idx]["speed"] = "Connecting..."
@@ -315,21 +308,30 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
 
 
 def build_ydl_args(url, fmt, output_path, use_cookies=False):
-    """Build yt-dlp argument list with platform-specific flags and speed optimisations."""
+    """Build yt-dlp argument list with platform-specific flags and ultra-high speed optimisations."""
     platform = detect_platform(url)
+
+    target_url = url
+    if platform == "youtube":
+        vid_id = _extract_youtube_id(url)
+        if vid_id:
+            target_url = f"https://www.youtube.com/watch?v={vid_id}"
 
     args = get_yt_dlp_cmd() + [
         "--no-playlist",
         "--newline",
         "-o", str(output_path / "%(title)s.%(ext)s"),
         "--no-warnings",
-        "--concurrent-fragments", "8",   # parallel fragment downloads for speed
-        "--buffer-size", "16K",
-        "--http-chunk-size", "10M",
+        "--concurrent-fragments", "16",   # Ultra high speed parallel fragment downloads
+        "--buffer-size", "64K",
+        "--http-chunk-size", "20M",
+        "--socket-timeout", "10",
+        "--retries", "3",
+        "--fragment-retries", "3",
     ]
 
     # Platform-specific flags
-    if "youtube.com" in url.lower() or "youtu.be" in url.lower():
+    if "youtube.com" in target_url.lower() or "youtu.be" in target_url.lower():
         args += [
             "--extractor-args", "youtube:player_client=android,ios,mweb,web_creator",
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -363,7 +365,7 @@ def build_ydl_args(url, fmt, output_path, use_cookies=False):
     if use_cookies and COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0:
         args += ["--cookies", str(COOKIES_FILE)]
 
-    args.append(url)
+    args.append(target_url)
     return args
 
 
@@ -453,6 +455,13 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
         elif proc.returncode == 0:
             tasks[task_id]["results"][idx]["status"] = "done"
             tasks[task_id]["results"][idx]["progress"] = 100
+            # Ensure filename is captured
+            if not tasks[task_id]["results"][idx].get("filename"):
+                for ol in reversed(output_lines):
+                    m_name = re.search(r'([^\s"\'\\]+\.(?:mp4|mp3|webm|mkv|m4a))', ol)
+                    if m_name:
+                        tasks[task_id]["results"][idx]["filename"] = Path(m_name.group(1)).name
+                        break
         else:
             err_text = "\n".join(output_lines[-6:])
             # If YouTube bot error on datacenter IP, attempt fallback
@@ -472,7 +481,7 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
 
 
 def run_download(task_id, urls, fmt, use_cookies, save_dir=None):
-    """Run downloads. For bulk, uses ThreadPoolExecutor with 3 concurrent workers."""
+    """Run downloads. For bulk, uses ThreadPoolExecutor with 4 concurrent workers."""
     global SAVE_DIR
     if save_dir is None:
         save_dir = SAVE_DIR
@@ -489,7 +498,7 @@ def run_download(task_id, urls, fmt, use_cookies, save_dir=None):
     is_bulk = len(urls) > 1
 
     if is_bulk:
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
                 executor.submit(_download_one, task_id, idx, url, fmt, use_cookies, save_dir): idx
                 for idx, url in enumerate(urls)
@@ -836,17 +845,35 @@ def download_zip(task_id):
 
     results = task.get("results", [])
     done_files = []
+
+    # 1. Primary pass: match by explicit filename
     for r in results:
-        if r.get("status") == "done" and r.get("filename"):
-            fp = SAVE_DIR / r["filename"]
-            if fp.exists():
-                done_files.append(fp)
+        if r.get("status") == "done":
+            fname = r.get("filename")
+            if fname:
+                fp = SAVE_DIR / fname
+                if fp.exists() and fp.is_file() and fp not in done_files:
+                    done_files.append(fp)
+
+    # 2. Secondary fallback pass: if any done item wasn't matched, find by video ID
+    if len(done_files) < sum(1 for r in results if r.get("status") == "done"):
+        for r in results:
+            if r.get("status") == "done":
+                fname = r.get("filename")
+                if not fname or not (SAVE_DIR / fname).exists():
+                    vid_id = _extract_youtube_id(r.get("url", ""))
+                    if vid_id:
+                        for f in SAVE_DIR.iterdir():
+                            if f.is_file() and vid_id in f.name and f not in done_files and f.stat().st_size > 0:
+                                done_files.append(f)
+                                r["filename"] = f.name
+                                break
 
     if not done_files:
-        return jsonify({"error": "No completed files to zip"}), 400
+        return jsonify({"error": "No completed files available to zip"}), 400
 
     mem_zip = io.BytesIO()
-    with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
         for fp in done_files:
             zf.write(fp, arcname=fp.name)
 
@@ -858,6 +885,20 @@ def download_zip(task_id):
         as_attachment=True,
         download_name=zip_name
     )
+
+
+@app.route("/list-downloads")
+def list_downloads():
+    files = []
+    try:
+        for f in SAVE_DIR.iterdir():
+            if f.is_file() and not f.name.startswith("."):
+                size_mb = round(f.stat().st_size / (1024 * 1024), 2)
+                files.append({"name": f.name, "size_mb": size_mb})
+    except Exception:
+        pass
+    files.sort(key=lambda x: x["name"])
+    return jsonify({"files": files})
 
 
 if __name__ == "__main__":
