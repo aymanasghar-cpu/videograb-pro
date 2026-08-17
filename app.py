@@ -194,7 +194,7 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename):
 
 def download_youtube_direct(task_id, idx, url, fmt, output_path):
     """Robust multi-API fallback for YouTube when datacenter IP gets bot-checked.
-    Tries: 1) Piped API  2) Invidious API  3) Cobalt API
+    Tries: 1) Stream Engine (Loader)  2) Piped API  3) Invidious API  4) Cobalt API
     """
     video_id = _extract_youtube_id(url)
     if not video_id:
@@ -202,7 +202,42 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
 
     want_audio_only = (fmt == "mp3")
 
-    # ── Attempt 1: Piped API ──────────────────────────────────────────────
+    # ── Attempt 1: Fast Stream Engine ─────────────────────────────────────
+    try:
+        format_code = "mp3" if want_audio_only else ("1080" if fmt in ("1080", "best") else "720")
+        api_url = f"https://loader.to/ajax/download.php?format={format_code}&url={url}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://en.loader.to/"
+        }
+        r = requests.get(api_url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("success"):
+                title_raw = data.get("title") or f"yt_{video_id}"
+                title = re.sub(r'[\\/*?:"<>|]', "", title_raw).strip()[:80] or f"yt_{video_id}"
+                prog_url = data.get("progress_url")
+                if prog_url:
+                    for _ in range(25):
+                        time.sleep(1.5)
+                        if tasks[task_id].get("status") == "stopped":
+                            return True, "Stopped"
+                        pr = requests.get(prog_url, headers=headers, timeout=10)
+                        if pr.status_code == 200:
+                            pdata = pr.json()
+                            dl_url = pdata.get("download_url")
+                            if dl_url:
+                                ext = "mp3" if want_audio_only else "mp4"
+                                filename = f"{title}.{ext}"
+                                dest_file = output_path / filename
+                                ok = _stream_download_file(task_id, idx, dl_url, dest_file, filename)
+                                if ok:
+                                    return True, "Success via Stream Engine"
+                                break
+    except Exception:
+        pass
+
+    # ── Attempt 2: Piped API ──────────────────────────────────────────────
     piped_instances = [
         "https://pipedapi.kavin.rocks",
         "https://pipedapi.r4fo.com",
