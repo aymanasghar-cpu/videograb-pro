@@ -262,8 +262,8 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expecte
 
 
 def download_youtube_direct(task_id, idx, url, fmt, output_path):
-    """Robust multi-API fallback for YouTube when datacenter IP gets bot-checked.
-    Tries: 1) Stream Engine (Loader)  2) Piped API  3) Invidious API  4) Cobalt API
+    """Fast YouTube downloader — tries instant stream APIs first to eliminate wait times.
+    Order: 1) Piped (instant)  2) Invidious (instant)  3) Cobalt  4) Loader.to (slow but reliable)
     """
     video_id = _extract_youtube_id(url)
     if not video_id:
@@ -271,60 +271,23 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
 
     want_audio_only = (fmt == "mp3")
     tasks[task_id]["results"][idx]["status"] = "downloading"
-    tasks[task_id]["results"][idx]["speed"] = "Connecting..."
-    tasks[task_id]["results"][idx]["progress"] = 5
+    tasks[task_id]["results"][idx]["speed"] = "Fetching stream..."
+    tasks[task_id]["results"][idx]["progress"] = 3
 
-    # ── Attempt 1: Fast Stream Engine ─────────────────────────────────────
-    try:
-        format_code = "mp3" if want_audio_only else ("1080" if fmt in ("1080", "best") else "720")
-        api_url = f"https://loader.to/ajax/download.php?format={format_code}&url={url}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://en.loader.to/"
-        }
-        r = requests.get(api_url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("success"):
-                title_raw = data.get("title") or f"yt_{video_id}"
-                title = re.sub(r'[\\/*?:"<>|]', "", title_raw).strip()[:80] or f"yt_{video_id}"
-                tasks[task_id]["results"][idx]["filename"] = f"{title}.{'mp3' if want_audio_only else 'mp4'}"
-                prog_url = data.get("progress_url")
-                if prog_url:
-                    for wait_i in range(30):
-                        time.sleep(1.2)
-                        if tasks[task_id].get("status") == "stopped":
-                            return True, "Stopped"
-                        # Show progressive connecting progress
-                        tasks[task_id]["results"][idx]["progress"] = min(5 + wait_i * 2, 25)
-                        tasks[task_id]["results"][idx]["speed"] = "Initializing stream..."
-                        pr = requests.get(prog_url, headers=headers, timeout=10)
-                        if pr.status_code == 200:
-                            pdata = pr.json()
-                            dl_url = pdata.get("download_url")
-                            if dl_url:
-                                ext = "mp3" if want_audio_only else "mp4"
-                                filename = f"{title}.{ext}"
-                                dest_file = output_path / filename
-                                ok = _stream_download_file(task_id, idx, dl_url, dest_file, filename)
-                                if ok:
-                                    return True, "Success via Stream Engine"
-                                break
-    except Exception:
-        pass
-
-    # ── Attempt 2: Piped API ──────────────────────────────────────────────
+    # ── Attempt 1: Piped API (instant stream URL, no wait) ────────────────
     piped_instances = [
         "https://pipedapi.kavin.rocks",
         "https://pipedapi.r4fo.com",
         "https://api.piped.projectsegfault.com",
+        "https://pipedapi.tokhmi.xyz",
     ]
     for piped in piped_instances:
         try:
-            r = requests.get(f"{piped}/streams/{video_id}", timeout=12)
+            tasks[task_id]["results"][idx]["speed"] = f"Connecting via Piped..."
+            r = requests.get(f"{piped}/streams/{video_id}", timeout=8)
             if r.status_code == 200:
                 data = r.json()
-                title = re.sub(r'[\\/*?:"<>|]', "", data.get("title", f"yt_{video_id}")).strip()[:80] or f"yt_{video_id}"
+                title = re.sub(r'[\\/*?"<>|]', "", data.get("title", f"yt_{video_id}")).strip()[:80] or f"yt_{video_id}"
 
                 if want_audio_only:
                     streams = data.get("audioStreams", [])
@@ -332,9 +295,7 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
                     ext = "mp3"
                 else:
                     streams = data.get("videoStreams", [])
-                    # Filter by quality preference
                     target_h = 1080 if fmt in ("1080", "best") else (720 if fmt == "720" else 1080)
-                    # Prefer streams with both video+audio, then by resolution
                     combined = [s for s in streams if s.get("videoOnly") is False]
                     if combined:
                         streams = sorted(combined, key=lambda s: abs(int(s.get("height", 0)) - target_h))
@@ -347,31 +308,33 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
                     if stream_url:
                         filename = f"{title}.{ext}"
                         dest_file = output_path / filename
+                        tasks[task_id]["results"][idx]["filename"] = filename
                         ok = _stream_download_file(task_id, idx, stream_url, dest_file, filename)
                         if ok:
                             return True, "Success via Piped"
         except Exception:
             continue
 
-    # ── Attempt 2: Invidious API ──────────────────────────────────────────
+    # ── Attempt 2: Invidious API (instant stream URL, no wait) ───────────
     invidious_instances = [
         "https://inv.nadeko.net",
         "https://invidious.nerdvpn.de",
+        "https://yt.artemislena.eu",
         "https://vid.puffyan.us",
     ]
     for inv in invidious_instances:
         try:
-            r = requests.get(f"{inv}/api/v1/videos/{video_id}?fields=title,adaptiveFormats,formatStreams", timeout=12)
+            tasks[task_id]["results"][idx]["speed"] = "Connecting via Invidious..."
+            r = requests.get(f"{inv}/api/v1/videos/{video_id}?fields=title,adaptiveFormats,formatStreams", timeout=8)
             if r.status_code == 200:
                 data = r.json()
-                title = re.sub(r'[\\/*?:"<>|]', "", data.get("title", f"yt_{video_id}")).strip()[:80] or f"yt_{video_id}"
+                title = re.sub(r'[\\/*?"<>|]', "", data.get("title", f"yt_{video_id}")).strip()[:80] or f"yt_{video_id}"
 
                 if want_audio_only:
                     streams = [s for s in data.get("adaptiveFormats", []) if "audio" in s.get("type", "")]
                     streams = sorted(streams, key=lambda s: int(s.get("bitrate", "0")), reverse=True)
                     ext = "mp3"
                 else:
-                    # formatStreams has combined a/v — best for direct download
                     streams = data.get("formatStreams", [])
                     if not streams:
                         streams = [s for s in data.get("adaptiveFormats", []) if "video" in s.get("type", "")]
@@ -382,43 +345,78 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
                     if stream_url:
                         filename = f"{title}.{ext}"
                         dest_file = output_path / filename
+                        tasks[task_id]["results"][idx]["filename"] = filename
                         ok = _stream_download_file(task_id, idx, stream_url, dest_file, filename)
                         if ok:
                             return True, "Success via Invidious"
         except Exception:
             continue
 
-    # ── Attempt 3: Cobalt API (v7+ format) ────────────────────────────────
-    cobalt_instances = [
-        "https://api.cobalt.tools",
-    ]
-    for cobalt in cobalt_instances:
-        try:
-            payload = {"url": url}
-            if want_audio_only:
-                payload["downloadMode"] = "audio"
-                payload["audioFormat"] = "mp3"
-            else:
-                payload["downloadMode"] = "auto"
-                payload["videoQuality"] = "1080" if fmt in ("1080", "best") else "720"
+    # ── Attempt 3: Cobalt API ─────────────────────────────────────────────
+    try:
+        tasks[task_id]["results"][idx]["speed"] = "Connecting via Cobalt..."
+        payload = {"url": url}
+        if want_audio_only:
+            payload["downloadMode"] = "audio"
+            payload["audioFormat"] = "mp3"
+        else:
+            payload["downloadMode"] = "auto"
+            payload["videoQuality"] = "1080" if fmt in ("1080", "best") else "720"
 
-            hdrs = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            }
-            r = requests.post(cobalt, json=payload, headers=hdrs, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-                stream_url = data.get("url")
-                if stream_url:
-                    ext = "mp3" if want_audio_only else "mp4"
-                    filename = data.get("filename") or f"yt_{video_id}.{ext}"
-                    dest_file = output_path / filename
-                    ok = _stream_download_file(task_id, idx, stream_url, dest_file, filename)
-                    if ok:
-                        return True, "Success via Cobalt"
-        except Exception:
-            continue
+        hdrs = {"Accept": "application/json", "Content-Type": "application/json"}
+        r = requests.post("https://api.cobalt.tools", json=payload, headers=hdrs, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            stream_url = data.get("url")
+            if stream_url:
+                ext = "mp3" if want_audio_only else "mp4"
+                filename = data.get("filename") or f"yt_{video_id}.{ext}"
+                dest_file = output_path / filename
+                tasks[task_id]["results"][idx]["filename"] = filename
+                ok = _stream_download_file(task_id, idx, stream_url, dest_file, filename)
+                if ok:
+                    return True, "Success via Cobalt"
+    except Exception:
+        pass
+
+    # ── Attempt 4: Loader.to (slower — polls until stream is ready) ────────
+    try:
+        tasks[task_id]["results"][idx]["speed"] = "Preparing via Loader..."
+        format_code = "mp3" if want_audio_only else ("1080" if fmt in ("1080", "best") else "720")
+        api_url = f"https://loader.to/ajax/download.php?format={format_code}&url={url}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://en.loader.to/"
+        }
+        r = requests.get(api_url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("success"):
+                title_raw = data.get("title") or f"yt_{video_id}"
+                title = re.sub(r'[\\/*?"<>|]', "", title_raw).strip()[:80] or f"yt_{video_id}"
+                tasks[task_id]["results"][idx]["filename"] = f"{title}.{'mp3' if want_audio_only else 'mp4'}"
+                prog_url = data.get("progress_url")
+                if prog_url:
+                    for wait_i in range(25):
+                        time.sleep(1.0)
+                        if tasks[task_id].get("status") == "stopped":
+                            return True, "Stopped"
+                        tasks[task_id]["results"][idx]["progress"] = min(5 + wait_i * 2, 30)
+                        tasks[task_id]["results"][idx]["speed"] = f"Preparing stream ({wait_i+1}/25)..."
+                        pr = requests.get(prog_url, headers=headers, timeout=10)
+                        if pr.status_code == 200:
+                            pdata = pr.json()
+                            dl_url = pdata.get("download_url")
+                            if dl_url:
+                                ext = "mp3" if want_audio_only else "mp4"
+                                filename = f"{title}.{ext}"
+                                dest_file = output_path / filename
+                                ok = _stream_download_file(task_id, idx, dl_url, dest_file, filename)
+                                if ok:
+                                    return True, "Success via Loader.to"
+                                break
+    except Exception:
+        pass
 
     return False, "All YouTube fallback APIs failed"
 
@@ -440,7 +438,7 @@ def build_ydl_args(url, fmt, output_path, use_cookies=False):
     # Platform-specific flags
     if "youtube.com" in url.lower() or "youtu.be" in url.lower():
         args += [
-            "--extractor-args", "youtube:player_client=android_vr,android_creator,android_embedded,android",
+            "--extractor-args", "youtube:player_client=android,ios,mweb,web_creator",
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         ]
     else:
@@ -490,12 +488,6 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
     # TikTok: fast direct API first
     if platform == "tiktok":
         success, msg = download_tiktok_direct(task_id, idx, url, fmt, save_dir)
-        if success:
-            return
-
-    # YouTube: fast stream engine first (instant start in 2s, bypasses 20s cloud bot timeout)
-    if "youtube.com" in url.lower() or "youtu.be" in url.lower():
-        success, msg = download_youtube_direct(task_id, idx, url, fmt, save_dir)
         if success:
             return
 
