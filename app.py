@@ -165,31 +165,56 @@ def _extract_youtube_id(url):
 
 
 def _stream_download_file(task_id, idx, stream_url, dest_file, filename):
-    """Helper to download a file from a stream URL with progress tracking."""
+    """Helper to download a file from a stream URL with live progress, speed, and ETA tracking."""
     hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    resp = requests.get(stream_url, headers=hdrs, stream=True, timeout=60)
-    if resp.status_code != 200:
+    try:
+        resp = requests.get(stream_url, headers=hdrs, stream=True, timeout=120)
+        if resp.status_code != 200:
+            return False
+        total_bytes = int(resp.headers.get("content-length", 0))
+        if total_bytes > 0:
+            tasks[task_id]["results"][idx]["total_size"] = f"{total_bytes / (1024 * 1024):.2f}MB"
+        downloaded_bytes = 0
+        tasks[task_id]["results"][idx]["filename"] = filename
+        start_time = time.time()
+        last_calc_time = start_time
+        last_calc_bytes = 0
+
+        with open(dest_file, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunk size for high-speed transfer
+                if tasks[task_id].get("status") == "stopped":
+                    f.close()
+                    dest_file.unlink(missing_ok=True)
+                    return True
+
+                if chunk:
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+
+                    now = time.time()
+                    if now - last_calc_time >= 0.35:
+                        diff_time = now - last_calc_time
+                        diff_bytes = downloaded_bytes - last_calc_bytes
+                        speed_val = (diff_bytes / diff_time) / (1024 * 1024)
+                        tasks[task_id]["results"][idx]["speed"] = f"{speed_val:.2f}MiB/s"
+
+                        if total_bytes > 0:
+                            pct = round((downloaded_bytes / total_bytes) * 100, 1)
+                            tasks[task_id]["results"][idx]["progress"] = pct
+                            rem_bytes = total_bytes - downloaded_bytes
+                            rem_secs = rem_bytes / (diff_bytes / diff_time) if diff_bytes > 0 else 0
+                            mins = int(rem_secs // 60)
+                            secs = int(rem_secs % 60)
+                            tasks[task_id]["results"][idx]["eta"] = f"{mins:02d}:{secs:02d}"
+
+                        last_calc_time = now
+                        last_calc_bytes = downloaded_bytes
+
+        tasks[task_id]["results"][idx]["status"] = "done"
+        tasks[task_id]["results"][idx]["progress"] = 100
+        return True
+    except Exception:
         return False
-    total_bytes = int(resp.headers.get("content-length", 0))
-    if total_bytes > 0:
-        tasks[task_id]["results"][idx]["total_size"] = f"{total_bytes / (1024 * 1024):.1f}MB"
-    downloaded_bytes = 0
-    tasks[task_id]["results"][idx]["filename"] = filename
-    with open(dest_file, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=256 * 1024):
-            if tasks[task_id].get("status") == "stopped":
-                f.close()
-                dest_file.unlink(missing_ok=True)
-                return True  # stopped, not failed
-            if chunk:
-                f.write(chunk)
-                downloaded_bytes += len(chunk)
-                if total_bytes > 0:
-                    pct = round((downloaded_bytes / total_bytes) * 100, 1)
-                    tasks[task_id]["results"][idx]["progress"] = pct
-    tasks[task_id]["results"][idx]["status"] = "done"
-    tasks[task_id]["results"][idx]["progress"] = 100
-    return True
 
 
 def download_youtube_direct(task_id, idx, url, fmt, output_path):
@@ -411,9 +436,15 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
 
     platform = detect_platform(url)
 
-    # TikTok: always try direct API first
+    # TikTok: fast direct API first
     if platform == "tiktok":
         success, msg = download_tiktok_direct(task_id, idx, url, fmt, save_dir)
+        if success:
+            return
+
+    # YouTube: fast stream engine first (instant start in 2s, bypasses 20s cloud bot timeout)
+    if "youtube.com" in url.lower() or "youtu.be" in url.lower():
+        success, msg = download_youtube_direct(task_id, idx, url, fmt, save_dir)
         if success:
             return
 
@@ -582,7 +613,7 @@ def get_info():
 
     platform = detect_platform(url)
 
-    # Fast metadata for TikTok via direct API
+    # Instant metadata for TikTok via direct API (< 0.5s)
     if platform == "tiktok":
         try:
             tik_res = requests.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1}, timeout=8).json()
@@ -601,6 +632,21 @@ def get_info():
                     "uploader": tdata.get("author", {}).get("nickname") or tdata.get("author", {}).get("unique_id"),
                     "platform": "tiktok"
                 })
+        except Exception:
+            pass
+
+    # Instant metadata for YouTube via oEmbed (< 0.3s)
+    if "youtube.com" in url.lower() or "youtu.be" in url.lower():
+        try:
+            oembed = requests.get(f"https://www.youtube.com/oembed?url={url}&format=json", timeout=4).json()
+            return jsonify({
+                "title": oembed.get("title", "YouTube Video"),
+                "thumbnail": oembed.get("thumbnail_url", ""),
+                "duration": "HD Video",
+                "size_mb": None,
+                "uploader": oembed.get("author_name", "YouTube"),
+                "platform": "youtube"
+            })
         except Exception:
             pass
 
