@@ -164,24 +164,32 @@ def _extract_youtube_id(url):
     return None
 
 
-def _stream_download_file(task_id, idx, stream_url, dest_file, filename):
-    """Helper to download a file from a stream URL with live progress, speed, and ETA tracking."""
+def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expected_total_bytes=0):
+    """Helper to download a file from a stream URL with live progress, MBs, speed, and ETA tracking."""
     hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        resp = requests.get(stream_url, headers=hdrs, stream=True, timeout=120)
+        resp = requests.get(stream_url, headers=hdrs, stream=True, timeout=180)
         if resp.status_code != 200:
             return False
-        total_bytes = int(resp.headers.get("content-length", 0))
+
+        header_len = int(resp.headers.get("content-length", 0))
+        total_bytes = header_len if header_len > 0 else expected_total_bytes
+
         if total_bytes > 0:
-            tasks[task_id]["results"][idx]["total_size"] = f"{total_bytes / (1024 * 1024):.2f}MB"
+            tasks[task_id]["results"][idx]["total_size"] = f"{total_bytes / (1024 * 1024):.1f} MB"
+
         downloaded_bytes = 0
         tasks[task_id]["results"][idx]["filename"] = filename
+        tasks[task_id]["results"][idx]["status"] = "downloading"
         start_time = time.time()
         last_calc_time = start_time
         last_calc_bytes = 0
 
+        # Adaptive estimation for chunked streams without content-length
+        estimated_total = total_bytes if total_bytes > 0 else max(15 * 1024 * 1024, 1)
+
         with open(dest_file, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunk size for high-speed transfer
+            for chunk in resp.iter_content(chunk_size=512 * 1024):  # 512KB chunks for smooth & rapid updates
                 if tasks[task_id].get("status") == "stopped":
                     f.close()
                     dest_file.unlink(missing_ok=True)
@@ -192,26 +200,40 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename):
                     downloaded_bytes += len(chunk)
 
                     now = time.time()
-                    if now - last_calc_time >= 0.35:
+                    if now - last_calc_time >= 0.25:  # 4 UI updates/sec
                         diff_time = now - last_calc_time
                         diff_bytes = downloaded_bytes - last_calc_bytes
-                        speed_val = (diff_bytes / diff_time) / (1024 * 1024)
-                        tasks[task_id]["results"][idx]["speed"] = f"{speed_val:.2f}MiB/s"
+                        speed_val = (diff_bytes / diff_time) / (1024 * 1024) if diff_time > 0 else 0
+                        tasks[task_id]["results"][idx]["speed"] = f"{speed_val:.2f} MB/s"
+
+                        dl_mb = downloaded_bytes / (1024 * 1024)
+                        tasks[task_id]["results"][idx]["downloaded_size"] = f"{dl_mb:.1f} MB"
 
                         if total_bytes > 0:
-                            pct = round((downloaded_bytes / total_bytes) * 100, 1)
+                            pct = min(round((downloaded_bytes / total_bytes) * 100, 1), 99.9)
                             tasks[task_id]["results"][idx]["progress"] = pct
                             rem_bytes = total_bytes - downloaded_bytes
-                            rem_secs = rem_bytes / (diff_bytes / diff_time) if diff_bytes > 0 else 0
+                            rem_secs = rem_bytes / (diff_bytes / diff_time) if (diff_time > 0 and diff_bytes > 0) else 0
                             mins = int(rem_secs // 60)
                             secs = int(rem_secs % 60)
                             tasks[task_id]["results"][idx]["eta"] = f"{mins:02d}:{secs:02d}"
+                        else:
+                            # Dynamic expanding estimation so the bar moves smoothly
+                            if downloaded_bytes > estimated_total * 0.85:
+                                estimated_total = int(downloaded_bytes * 1.3)
+                            pct = min(round((downloaded_bytes / estimated_total) * 95, 1), 95.0)
+                            tasks[task_id]["results"][idx]["progress"] = pct
+                            tasks[task_id]["results"][idx]["total_size"] = f"~{estimated_total / (1024 * 1024):.0f} MB"
 
                         last_calc_time = now
                         last_calc_bytes = downloaded_bytes
 
+        final_mb = downloaded_bytes / (1024 * 1024)
+        tasks[task_id]["results"][idx]["downloaded_size"] = f"{final_mb:.1f} MB"
+        tasks[task_id]["results"][idx]["total_size"] = f"{final_mb:.1f} MB"
         tasks[task_id]["results"][idx]["status"] = "done"
         tasks[task_id]["results"][idx]["progress"] = 100
+        tasks[task_id]["results"][idx]["eta"] = "00:00"
         return True
     except Exception:
         return False
@@ -226,6 +248,9 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
         return False, "Could not extract YouTube video ID"
 
     want_audio_only = (fmt == "mp3")
+    tasks[task_id]["results"][idx]["status"] = "downloading"
+    tasks[task_id]["results"][idx]["speed"] = "Connecting..."
+    tasks[task_id]["results"][idx]["progress"] = 5
 
     # ── Attempt 1: Fast Stream Engine ─────────────────────────────────────
     try:
@@ -241,12 +266,16 @@ def download_youtube_direct(task_id, idx, url, fmt, output_path):
             if data.get("success"):
                 title_raw = data.get("title") or f"yt_{video_id}"
                 title = re.sub(r'[\\/*?:"<>|]', "", title_raw).strip()[:80] or f"yt_{video_id}"
+                tasks[task_id]["results"][idx]["filename"] = f"{title}.{'mp3' if want_audio_only else 'mp4'}"
                 prog_url = data.get("progress_url")
                 if prog_url:
-                    for _ in range(25):
-                        time.sleep(1.5)
+                    for wait_i in range(30):
+                        time.sleep(1.2)
                         if tasks[task_id].get("status") == "stopped":
                             return True, "Stopped"
+                        # Show progressive connecting progress
+                        tasks[task_id]["results"][idx]["progress"] = min(5 + wait_i * 2, 25)
+                        tasks[task_id]["results"][idx]["speed"] = "Initializing stream..."
                         pr = requests.get(prog_url, headers=headers, timeout=10)
                         if pr.status_code == 200:
                             pdata = pr.json()
@@ -469,7 +498,7 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
             line = line.strip()
             output_lines.append(line)
 
-            # Parse progress + speed + ETA + total size
+            # Parse progress + speed + ETA + total size + downloaded size
             if "[download]" in line and "%" in line:
                 pct_m = re.search(r'(\d+(?:\.\d+)?)%', line)
                 if pct_m:
@@ -480,6 +509,16 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
                 size_m = re.search(r'of\s+~?(\d+(?:\.\d+)?\s*\w+)', line)
                 if size_m:
                     tasks[task_id]["results"][idx]["total_size"] = size_m.group(1).strip()
+                    try:
+                        pct_val = tasks[task_id]["results"][idx].get("progress", 0)
+                        tot_match = re.match(r'(\d+(?:\.\d+)?)\s*([A-Za-z]+)', size_m.group(1).strip())
+                        if tot_match:
+                            num = float(tot_match.group(1))
+                            unit = tot_match.group(2)
+                            dl_num = (pct_val / 100.0) * num
+                            tasks[task_id]["results"][idx]["downloaded_size"] = f"{dl_num:.1f} {unit}"
+                    except Exception:
+                        pass
                 speed_m = re.search(r'at\s+~?(\d+(?:\.\d+)?\s*\S+/(?:s|sec))', line)
                 if speed_m:
                     tasks[task_id]["results"][idx]["speed"] = speed_m.group(1).strip()
@@ -536,7 +575,7 @@ def run_download(task_id, urls, fmt, use_cookies, save_dir=None):
     # Pre-populate all results as pending so the frontend can show the full list immediately
     tasks[task_id]["results"] = [
         {"url": u, "status": "pending", "progress": 0,
-         "filename": None, "error": None, "speed": None, "eta": None, "total_size": None}
+         "filename": None, "error": None, "speed": None, "eta": None, "total_size": None, "downloaded_size": None}
         for u in urls
     ]
 
@@ -839,18 +878,47 @@ def serve_file(filename):
     return send_from_directory(SAVE_DIR, filename, as_attachment=True)
 
 
-@app.route("/list-downloads")
-def list_downloads():
-    files = []
-    try:
-        for f in SAVE_DIR.iterdir():
-            if f.is_file():
-                size_mb = round(f.stat().st_size / (1024 * 1024), 2)
-                files.append({"name": f.name, "size_mb": size_mb})
-    except Exception:
-        pass
-    files.sort(key=lambda x: x["name"])
-    return jsonify({"files": files})
+@app.route("/retry-item", methods=["POST"])
+def retry_item():
+    data = request.get_json() or {}
+    task_id = data.get("task_id")
+    idx = data.get("idx")
+    fmt = data.get("format", "best")
+    use_cookies = data.get("use_cookies", False)
+
+    if not task_id or idx is None:
+        return jsonify({"error": "task_id and idx required"}), 400
+
+    task = tasks.get(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+
+    results = task.get("results", [])
+    if idx < 0 or idx >= len(results):
+        return jsonify({"error": "Invalid item index"}), 400
+
+    url = results[idx]["url"]
+    results[idx] = {
+        "url": url,
+        "status": "pending",
+        "progress": 0,
+        "filename": None,
+        "error": None,
+        "speed": None,
+        "eta": None,
+        "total_size": None,
+        "downloaded_size": None,
+    }
+    task["status"] = "running"
+
+    def _do_retry():
+        _download_one(task_id, idx, url, fmt, use_cookies, SAVE_DIR)
+        all_finished = all(r.get("status") in ("done", "failed", "stopped") for r in tasks[task_id].get("results", []))
+        if all_finished and tasks[task_id].get("status") != "stopped":
+            tasks[task_id]["status"] = "done"
+
+    threading.Thread(target=_do_retry, daemon=True).start()
+    return jsonify({"success": True})
 
 
 if __name__ == "__main__":

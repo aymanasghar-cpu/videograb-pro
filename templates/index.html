@@ -285,15 +285,33 @@
     .badge-stopped { background: rgba(245,158,11,0.2); color: var(--warning); }
 
     .bulk-item .mini-progress {
-      width: 80px; height: 4px;
+      width: 110px; height: 6px;
       background: rgba(255,255,255,0.06); border-radius: 100px; overflow: hidden;
+      flex-shrink: 0;
     }
     .bulk-item .mini-bar {
       height: 100%; background: linear-gradient(90deg, var(--primary), var(--accent));
-      border-radius: 100px; transition: width 0.4s;
+      border-radius: 100px; transition: width 0.3s ease;
     }
-    .bulk-dl-link { font-size: 12px; color: var(--accent); text-decoration: none; flex-shrink: 0; }
-    .bulk-dl-link:hover { text-decoration: underline; }
+    .bulk-dl-link {
+      font-size: 12px; font-weight: 600; color: #10b981; background: rgba(16,185,129,0.15);
+      border: 1px solid rgba(16,185,129,0.3); border-radius: 6px; padding: 4px 10px;
+      text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
+      flex-shrink: 0; transition: all 0.2s;
+    }
+    .bulk-dl-link:hover {
+      background: rgba(16,185,129,0.3); color: #fff; transform: translateY(-1px);
+    }
+    .bulk-retry-btn {
+      background: rgba(99,102,241,0.15); border: 1px solid rgba(99,102,241,0.4);
+      color: #a5b4fc; border-radius: 6px; padding: 4px 10px; font-size: 12px;
+      font-weight: 600; font-family: 'Outfit', sans-serif; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 4px; transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .bulk-retry-btn:hover {
+      background: rgba(99,102,241,0.35); color: #fff; transform: translateY(-1px);
+    }
 
     /* ── Cookies Tab ── */
     .cookie-header {
@@ -775,12 +793,15 @@
           if (results.length > 0) {
             const r = results[0];
             const isStopped = task.status === 'stopped' || r.status === 'stopped';
-            const sizeInfo = r.total_size ? ` [${r.total_size}]` : '';
-            const speedInfo = r.speed ? ` | Speed: ${r.speed}` : '';
-            const etaInfo = r.eta ? ` | ETA: ${r.eta}` : '';
+            const dlInfo = r.downloaded_size ? `${r.downloaded_size}` : '';
+            const totalInfo = r.total_size ? ` / ${r.total_size}` : '';
+            const sizeText = (dlInfo || totalInfo) ? ` [${dlInfo}${totalInfo}]` : '';
+            const speedInfo = r.speed ? ` • ${r.speed}` : '';
+            const etaInfo = r.eta ? ` • ETA: ${r.eta}` : '';
+
             setProgress(r.progress || 0,
               r.status === 'done' ? 'Completed!' :
-              isStopped ? 'Stopped.' : `Downloading${sizeInfo}...${speedInfo}${etaInfo}`);
+              isStopped ? 'Stopped.' : `Downloading${sizeText}${speedInfo}${etaInfo}`);
             document.getElementById('single-status-text').textContent =
               r.status === 'failed' ? '❌ ' + (r.error || 'Failed') :
               isStopped ? '⏹ Download stopped by user.' : '';
@@ -858,12 +879,17 @@
         }
       } else if (r.status === 'failed') {
         resultsEl.innerHTML = `
-          <div class="result-item error">
-            <div class="result-icon">❌</div>
-            <div class="result-info">
-              <div class="result-name">Download failed</div>
-              <div class="result-meta">${escHtml(r.error || 'Unknown error')}</div>
+          <div class="result-item error" style="flex-direction:column; align-items:flex-start; gap:12px;">
+            <div style="display:flex; align-items:center; gap:12px; width:100%;">
+              <div class="result-icon">❌</div>
+              <div class="result-info">
+                <div class="result-name">Download failed</div>
+                <div class="result-meta">${escHtml(r.error || 'Unknown error')}</div>
+              </div>
             </div>
+            <button class="btn btn-primary" onclick="startSingleDownload()" style="width:auto; padding:8px 20px; font-size:13px; margin-left:46px;">
+              🔄 Retry Download
+            </button>
           </div>`;
         toast('Download failed: ' + (r.error || ''), 'error');
       }
@@ -925,6 +951,7 @@
         const bar = document.getElementById('mini-bar-' + i);
         const dlSpan = document.getElementById('bulk-dl-' + i);
         const item = document.getElementById('bulk-item-' + i);
+        const speedText = document.getElementById('bulk-speed-' + i);
         if (!badge) return;
 
         badge.className = 'status-badge badge-' + r.status;
@@ -932,28 +959,81 @@
 
         if (bar) bar.style.width = (r.progress || 0) + '%';
 
-        const speedText = document.getElementById('bulk-speed-' + i);
         if (speedText) {
           if (r.status === 'downloading') {
+            const dlInfo = r.downloaded_size ? `${r.downloaded_size}` : '';
+            const totalInfo = r.total_size ? ` / ${r.total_size}` : '';
+            const sizePart = (dlInfo || totalInfo) ? `${dlInfo}${totalInfo}` : '';
             const speedInfo = r.speed ? r.speed : '';
             const etaInfo = r.eta ? `(ETA: ${r.eta})` : '';
-            speedText.textContent = `${speedInfo} ${etaInfo}`.trim();
+            const pctText = (r.progress !== undefined && r.progress !== null) ? `${Math.round(r.progress)}%` : '';
+            speedText.textContent = [pctText, sizePart, speedInfo, etaInfo].filter(Boolean).join(' • ');
+          } else if (r.status === 'done') {
+            speedText.textContent = r.total_size ? `(${r.total_size})` : 'Done';
+          } else if (r.status === 'failed') {
+            speedText.textContent = 'Failed';
           } else {
             speedText.textContent = '';
           }
         }
 
-        if (r.status === 'done' && r.filename && dlSpan && !dlSpan.innerHTML) {
-          dlSpan.innerHTML = `<a class="bulk-dl-link" href="/files/${encodeURIComponent(r.filename)}" download>⬇️ Save</a>`;
-          if (item) item.style.borderColor = 'rgba(16,185,129,0.3)';
-        }
-        if (r.status === 'failed' && item) {
-          item.style.borderColor = 'rgba(239,68,68,0.3)';
-        }
-        if (r.status === 'stopped' && item) {
-          item.style.borderColor = 'rgba(245,158,11,0.3)';
+        if (dlSpan) {
+          if (r.status === 'done' && r.filename) {
+            dlSpan.innerHTML = `<a class="bulk-dl-link" href="/files/${encodeURIComponent(r.filename)}" download>⬇️ Save</a>`;
+            if (item) item.style.borderColor = 'rgba(16,185,129,0.3)';
+          } else if (r.status === 'failed') {
+            dlSpan.innerHTML = `<button class="bulk-retry-btn" onclick="retryBulkItem(${i})" title="Retry this download">🔄 Retry</button>`;
+            if (item) item.style.borderColor = 'rgba(239,68,68,0.3)';
+          } else if (r.status === 'stopped') {
+            dlSpan.innerHTML = `<button class="bulk-retry-btn" onclick="retryBulkItem(${i})" title="Resume / Retry">🔄 Retry</button>`;
+            if (item) item.style.borderColor = 'rgba(245,158,11,0.3)';
+          }
         }
       });
+    }
+
+    async function retryBulkItem(idx) {
+      const taskId = currentTaskId.bulk;
+      if (!taskId) return;
+
+      const badge = document.getElementById('bulk-badge-' + idx);
+      const dlSpan = document.getElementById('bulk-dl-' + idx);
+      const bar = document.getElementById('mini-bar-' + idx);
+      const speedText = document.getElementById('bulk-speed-' + idx);
+      const item = document.getElementById('bulk-item-' + idx);
+
+      if (badge) {
+        badge.className = 'status-badge badge-pending';
+        badge.textContent = 'RETRYING...';
+      }
+      if (bar) bar.style.width = '5%';
+      if (speedText) speedText.textContent = 'Restarting download...';
+      if (dlSpan) dlSpan.innerHTML = '';
+      if (item) item.style.borderColor = 'var(--border)';
+
+      const fmt = document.getElementById('bulk-format').value;
+      const useCookies = document.getElementById('bulk-cookies').checked;
+
+      try {
+        const res = await fetch('/retry-item', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: taskId, idx: idx, format: fmt, use_cookies: useCookies })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        toast(`Retrying item #${idx + 1}...`, 'info');
+        pollStatus(taskId, 'bulk');
+      } catch (e) {
+        toast('Retry failed: ' + e.message, 'error');
+        if (badge) {
+          badge.className = 'status-badge badge-failed';
+          badge.textContent = 'FAILED';
+        }
+        if (dlSpan) {
+          dlSpan.innerHTML = `<button class="bulk-retry-btn" onclick="retryBulkItem(${idx})">🔄 Retry</button>`;
+        }
+      }
     }
 
     function resetBulkBtn() {
