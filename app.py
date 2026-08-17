@@ -152,61 +152,164 @@ def download_tiktok_direct(task_id, idx, url, fmt, output_path):
         return False, str(e)
 
 
+def _extract_youtube_id(url):
+    """Extract YouTube video ID from various URL formats."""
+    import urllib.parse
+    parsed = urllib.parse.urlparse(url)
+    if "youtu.be" in parsed.hostname:
+        return parsed.path.lstrip("/").split("/")[0]
+    if "youtube.com" in parsed.hostname:
+        qs = urllib.parse.parse_qs(parsed.query)
+        return qs.get("v", [None])[0]
+    return None
+
+
+def _stream_download_file(task_id, idx, stream_url, dest_file, filename):
+    """Helper to download a file from a stream URL with progress tracking."""
+    hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    resp = requests.get(stream_url, headers=hdrs, stream=True, timeout=60)
+    if resp.status_code != 200:
+        return False
+    total_bytes = int(resp.headers.get("content-length", 0))
+    if total_bytes > 0:
+        tasks[task_id]["results"][idx]["total_size"] = f"{total_bytes / (1024 * 1024):.1f}MB"
+    downloaded_bytes = 0
+    tasks[task_id]["results"][idx]["filename"] = filename
+    with open(dest_file, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=256 * 1024):
+            if tasks[task_id].get("status") == "stopped":
+                f.close()
+                dest_file.unlink(missing_ok=True)
+                return True  # stopped, not failed
+            if chunk:
+                f.write(chunk)
+                downloaded_bytes += len(chunk)
+                if total_bytes > 0:
+                    pct = round((downloaded_bytes / total_bytes) * 100, 1)
+                    tasks[task_id]["results"][idx]["progress"] = pct
+    tasks[task_id]["results"][idx]["status"] = "done"
+    tasks[task_id]["results"][idx]["progress"] = 100
+    return True
+
+
 def download_youtube_direct(task_id, idx, url, fmt, output_path):
-    """Direct stream fallback for YouTube when cloud datacenter IP encounters bot challenge."""
-    try:
-        api_endpoints = [
-            "https://api.cobalt.tools/api/json",
-            "https://co.wuk.sh/api/json",
-            "https://cobalt-backend.canine.tools/"
-        ]
-        payload = {
-            "url": url,
-            "vQuality": "1080" if fmt in ("1080", "best") else ("720" if fmt == "720" else "720"),
-            "isAudioOnly": True if fmt == "mp3" else False,
-            "aFormat": "mp3" if fmt == "mp3" else "best"
-        }
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        for api in api_endpoints:
-            try:
-                r = requests.post(api, json=payload, headers=headers, timeout=12)
-                if r.status_code == 200:
-                    data = r.json()
-                    stream_url = data.get("url")
-                    filename = data.get("filename") or f"youtube_{int(time.time())}.mp4"
+    """Robust multi-API fallback for YouTube when datacenter IP gets bot-checked.
+    Tries: 1) Piped API  2) Invidious API  3) Cobalt API
+    """
+    video_id = _extract_youtube_id(url)
+    if not video_id:
+        return False, "Could not extract YouTube video ID"
+
+    want_audio_only = (fmt == "mp3")
+
+    # ── Attempt 1: Piped API ──────────────────────────────────────────────
+    piped_instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.r4fo.com",
+        "https://api.piped.projectsegfault.com",
+    ]
+    for piped in piped_instances:
+        try:
+            r = requests.get(f"{piped}/streams/{video_id}", timeout=12)
+            if r.status_code == 200:
+                data = r.json()
+                title = re.sub(r'[\\/*?:"<>|]', "", data.get("title", f"yt_{video_id}")).strip()[:80] or f"yt_{video_id}"
+
+                if want_audio_only:
+                    streams = data.get("audioStreams", [])
+                    streams = sorted(streams, key=lambda s: s.get("bitrate", 0), reverse=True)
+                    ext = "mp3"
+                else:
+                    streams = data.get("videoStreams", [])
+                    # Filter by quality preference
+                    target_h = 1080 if fmt in ("1080", "best") else (720 if fmt == "720" else 1080)
+                    # Prefer streams with both video+audio, then by resolution
+                    combined = [s for s in streams if s.get("videoOnly") is False]
+                    if combined:
+                        streams = sorted(combined, key=lambda s: abs(int(s.get("height", 0)) - target_h))
+                    else:
+                        streams = sorted(streams, key=lambda s: abs(int(s.get("height", 0)) - target_h))
+                    ext = "mp4"
+
+                if streams:
+                    stream_url = streams[0].get("url")
                     if stream_url:
+                        filename = f"{title}.{ext}"
                         dest_file = output_path / filename
-                        resp = requests.get(stream_url, stream=True, timeout=30)
-                        if resp.status_code == 200:
-                            total_bytes = int(resp.headers.get("content-length", 0))
-                            if total_bytes > 0:
-                                tasks[task_id]["results"][idx]["total_size"] = f"{total_bytes / (1024 * 1024):.2f}MB"
-                            downloaded_bytes = 0
-                            tasks[task_id]["results"][idx]["filename"] = filename
-                            with open(dest_file, "wb") as f:
-                                for chunk in resp.iter_content(chunk_size=256 * 1024):
-                                    if tasks[task_id].get("status") == "stopped":
-                                        f.close()
-                                        dest_file.unlink(missing_ok=True)
-                                        return True, "Stopped"
-                                    if chunk:
-                                        f.write(chunk)
-                                        downloaded_bytes += len(chunk)
-                                        if total_bytes > 0:
-                                            pct = round((downloaded_bytes / total_bytes) * 100, 1)
-                                            tasks[task_id]["results"][idx]["progress"] = pct
-                            tasks[task_id]["results"][idx]["status"] = "done"
-                            tasks[task_id]["results"][idx]["progress"] = 100
-                            return True, "Success"
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return False, "Direct stream fallback failed"
+                        ok = _stream_download_file(task_id, idx, stream_url, dest_file, filename)
+                        if ok:
+                            return True, "Success via Piped"
+        except Exception:
+            continue
+
+    # ── Attempt 2: Invidious API ──────────────────────────────────────────
+    invidious_instances = [
+        "https://inv.nadeko.net",
+        "https://invidious.nerdvpn.de",
+        "https://vid.puffyan.us",
+    ]
+    for inv in invidious_instances:
+        try:
+            r = requests.get(f"{inv}/api/v1/videos/{video_id}?fields=title,adaptiveFormats,formatStreams", timeout=12)
+            if r.status_code == 200:
+                data = r.json()
+                title = re.sub(r'[\\/*?:"<>|]', "", data.get("title", f"yt_{video_id}")).strip()[:80] or f"yt_{video_id}"
+
+                if want_audio_only:
+                    streams = [s for s in data.get("adaptiveFormats", []) if "audio" in s.get("type", "")]
+                    streams = sorted(streams, key=lambda s: int(s.get("bitrate", "0")), reverse=True)
+                    ext = "mp3"
+                else:
+                    # formatStreams has combined a/v — best for direct download
+                    streams = data.get("formatStreams", [])
+                    if not streams:
+                        streams = [s for s in data.get("adaptiveFormats", []) if "video" in s.get("type", "")]
+                    ext = "mp4"
+
+                if streams:
+                    stream_url = streams[0].get("url")
+                    if stream_url:
+                        filename = f"{title}.{ext}"
+                        dest_file = output_path / filename
+                        ok = _stream_download_file(task_id, idx, stream_url, dest_file, filename)
+                        if ok:
+                            return True, "Success via Invidious"
+        except Exception:
+            continue
+
+    # ── Attempt 3: Cobalt API (v7+ format) ────────────────────────────────
+    cobalt_instances = [
+        "https://api.cobalt.tools",
+    ]
+    for cobalt in cobalt_instances:
+        try:
+            payload = {"url": url}
+            if want_audio_only:
+                payload["downloadMode"] = "audio"
+                payload["audioFormat"] = "mp3"
+            else:
+                payload["downloadMode"] = "auto"
+                payload["videoQuality"] = "1080" if fmt in ("1080", "best") else "720"
+
+            hdrs = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+            r = requests.post(cobalt, json=payload, headers=hdrs, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                stream_url = data.get("url")
+                if stream_url:
+                    ext = "mp3" if want_audio_only else "mp4"
+                    filename = data.get("filename") or f"yt_{video_id}.{ext}"
+                    dest_file = output_path / filename
+                    ok = _stream_download_file(task_id, idx, stream_url, dest_file, filename)
+                    if ok:
+                        return True, "Success via Cobalt"
+        except Exception:
+            continue
+
+    return False, "All YouTube fallback APIs failed"
 
 
 def build_ydl_args(url, fmt, output_path, use_cookies=False):
@@ -272,8 +375,19 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
     tasks[task_id]["results"][idx]["status"] = "downloading"
 
     platform = detect_platform(url)
+
+    # TikTok: always try direct API first
     if platform == "tiktok":
         success, msg = download_tiktok_direct(task_id, idx, url, fmt, save_dir)
+        if success:
+            return
+
+    # YouTube on cloud: try API fallback FIRST (yt-dlp always gets bot-checked on datacenter IPs)
+    is_cloud = os.environ.get("RENDER") or os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
+    is_youtube = "youtube.com" in url.lower() or "youtu.be" in url.lower()
+
+    if is_cloud and is_youtube:
+        success, msg = download_youtube_direct(task_id, idx, url, fmt, save_dir)
         if success:
             return
 

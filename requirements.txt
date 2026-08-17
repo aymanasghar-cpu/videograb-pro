@@ -2,4 +2,5 @@ flask
 flask-cors
 requests
 yt-dlp
+curl_cffi
 gunicorn
