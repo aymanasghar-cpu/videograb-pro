@@ -329,7 +329,7 @@ def build_ydl_args(url, fmt, output_path, use_cookies=False):
     # Platform-specific flags
     if "youtube.com" in url.lower() or "youtu.be" in url.lower():
         args += [
-            "--extractor-args", "youtube:player_client=android_embedded,android,ios,mweb",
+            "--extractor-args", "youtube:player_client=android_vr,android_creator,android_embedded,android",
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         ]
     else:
@@ -379,15 +379,6 @@ def _download_one(task_id, idx, url, fmt, use_cookies, save_dir):
     # TikTok: always try direct API first
     if platform == "tiktok":
         success, msg = download_tiktok_direct(task_id, idx, url, fmt, save_dir)
-        if success:
-            return
-
-    # YouTube on cloud: try API fallback FIRST (yt-dlp always gets bot-checked on datacenter IPs)
-    is_cloud = os.environ.get("RENDER") or os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
-    is_youtube = "youtube.com" in url.lower() or "youtu.be" in url.lower()
-
-    if is_cloud and is_youtube:
-        success, msg = download_youtube_direct(task_id, idx, url, fmt, save_dir)
         if success:
             return
 
@@ -581,7 +572,7 @@ def get_info():
     cmd = get_yt_dlp_cmd() + ["--dump-json", "--no-playlist"]
     if "youtube.com" in url.lower() or "youtu.be" in url.lower():
         cmd += [
-            "--extractor-args", "youtube:player_client=android_embedded,android,ios,mweb",
+            "--extractor-args", "youtube:player_client=android_vr,android_creator,android_embedded,android",
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         ]
     else:
