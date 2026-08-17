@@ -184,9 +184,11 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expecte
         start_time = time.time()
         last_calc_time = start_time
         last_calc_bytes = 0
+        last_pct = 0.0  # Never allow progress bar to go backwards
 
         # Adaptive estimation for chunked streams without content-length
-        estimated_total = total_bytes if total_bytes > 0 else max(15 * 1024 * 1024, 1)
+        # Start generous to avoid constant resets
+        estimated_total = total_bytes if total_bytes > 0 else max(20 * 1024 * 1024, 1)
 
         with open(dest_file, "wb") as f:
             for chunk in resp.iter_content(chunk_size=512 * 1024):  # 512KB chunks for smooth & rapid updates
@@ -210,20 +212,39 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expecte
                         tasks[task_id]["results"][idx]["downloaded_size"] = f"{dl_mb:.1f} MB"
 
                         if total_bytes > 0:
+                            # Exact content-length available
                             pct = min(round((downloaded_bytes / total_bytes) * 100, 1), 99.9)
+                            pct = max(pct, last_pct)  # Never go backwards
                             tasks[task_id]["results"][idx]["progress"] = pct
-                            rem_bytes = total_bytes - downloaded_bytes
-                            rem_secs = rem_bytes / (diff_bytes / diff_time) if (diff_time > 0 and diff_bytes > 0) else 0
-                            mins = int(rem_secs // 60)
-                            secs = int(rem_secs % 60)
-                            tasks[task_id]["results"][idx]["eta"] = f"{mins:02d}:{secs:02d}"
+                            last_pct = pct
+                            if speed_val > 0:
+                                rem_bytes = total_bytes - downloaded_bytes
+                                rem_secs = rem_bytes / (speed_val * 1024 * 1024)
+                                mins = int(rem_secs // 60)
+                                secs = int(rem_secs % 60)
+                                tasks[task_id]["results"][idx]["eta"] = f"{mins:02d}:{secs:02d}"
                         else:
-                            # Dynamic expanding estimation so the bar moves smoothly
-                            if downloaded_bytes > estimated_total * 0.85:
-                                estimated_total = int(downloaded_bytes * 1.3)
-                            pct = min(round((downloaded_bytes / estimated_total) * 95, 1), 95.0)
+                            # Chunked stream: grow estimated_total only when near the limit
+                            if downloaded_bytes > estimated_total * 0.88:
+                                estimated_total = int(downloaded_bytes * 1.30)
+                            # Smooth monotonic progress capped at 95%
+                            raw_pct = round((downloaded_bytes / estimated_total) * 95, 1)
+                            pct = max(raw_pct, last_pct)  # Never go backwards
+                            pct = min(pct, 95.0)
                             tasks[task_id]["results"][idx]["progress"] = pct
+                            last_pct = pct
                             tasks[task_id]["results"][idx]["total_size"] = f"~{estimated_total / (1024 * 1024):.0f} MB"
+                            # ETA for chunked streams using overall speed
+                            total_elapsed = now - start_time
+                            if total_elapsed > 0 and downloaded_bytes > 0:
+                                avg_speed_bytes = downloaded_bytes / total_elapsed
+                                # Estimate remaining as difference from current estimated total
+                                rem_bytes_est = max(estimated_total - downloaded_bytes, 0)
+                                if avg_speed_bytes > 0:
+                                    rem_secs = rem_bytes_est / avg_speed_bytes
+                                    mins = int(rem_secs // 60)
+                                    secs = int(rem_secs % 60)
+                                    tasks[task_id]["results"][idx]["eta"] = f"{mins:02d}:{secs:02d}"
 
                         last_calc_time = now
                         last_calc_bytes = downloaded_bytes
@@ -237,6 +258,7 @@ def _stream_download_file(task_id, idx, stream_url, dest_file, filename, expecte
         return True
     except Exception:
         return False
+
 
 
 def download_youtube_direct(task_id, idx, url, fmt, output_path):
@@ -919,6 +941,20 @@ def retry_item():
 
     threading.Thread(target=_do_retry, daemon=True).start()
     return jsonify({"success": True})
+
+
+@app.route("/list-downloads")
+def list_downloads():
+    files = []
+    try:
+        for f in SAVE_DIR.iterdir():
+            if f.is_file():
+                size_mb = round(f.stat().st_size / (1024 * 1024), 2)
+                files.append({"name": f.name, "size_mb": size_mb})
+    except Exception:
+        pass
+    files.sort(key=lambda x: x["name"])
+    return jsonify({"files": files})
 
 
 if __name__ == "__main__":
