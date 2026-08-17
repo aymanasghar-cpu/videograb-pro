@@ -312,6 +312,29 @@
     .bulk-retry-btn:hover {
       background: rgba(99,102,241,0.35); color: #fff; transform: translateY(-1px);
     }
+    .btn-zip {
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: #fff;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      padding: 13px 22px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 14px;
+      width: 100%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+      transition: all 0.25s ease;
+      font-family: 'Outfit', sans-serif;
+    }
+    .btn-zip:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(16, 185, 129, 0.45);
+      background: linear-gradient(135deg, #34d399, #10b981);
+    }
 
     /* ── Cookies Tab ── */
     .cookie-header {
@@ -630,6 +653,13 @@
         </button>
       </div>
 
+      <!-- Bulk ZIP Download Button -->
+      <div id="bulk-zip-container" style="display:none; margin: 16px 0 12px 0;">
+        <button class="btn-zip" id="bulk-zip-btn" onclick="downloadBulkZip()">
+          <span>🗜️</span> Download All as ZIP (<span id="bulk-zip-count">0</span> Videos)
+        </button>
+      </div>
+
       <!-- Bulk Item List -->
       <div class="bulk-list" id="bulk-list"></div>
     </div>
@@ -916,6 +946,10 @@
       btn.disabled = true;
       btn.innerHTML = '<div class="spinner"></div> Starting...';
 
+      // Hide zip container on new bulk start
+      const zipCont = document.getElementById('bulk-zip-container');
+      if (zipCont) zipCont.style.display = 'none';
+
       // Render pending list
       const listEl = document.getElementById('bulk-list');
       listEl.innerHTML = lines.map((u, i) => `
@@ -946,6 +980,8 @@
     }
 
     function updateBulkUI(results) {
+      let doneCount = 0;
+
       results.forEach((r, i) => {
         const badge = document.getElementById('bulk-badge-' + i);
         const bar = document.getElementById('mini-bar-' + i);
@@ -977,6 +1013,10 @@
           }
         }
 
+        if (r.status === 'done' && r.filename) {
+          doneCount++;
+        }
+
         if (dlSpan) {
           if (r.status === 'done' && r.filename) {
             dlSpan.innerHTML = `<a class="bulk-dl-link" href="/files/${encodeURIComponent(r.filename)}" download>⬇️ Save</a>`;
@@ -990,6 +1030,35 @@
           }
         }
       });
+
+      // Show/update ZIP bundle button
+      const zipCont = document.getElementById('bulk-zip-container');
+      const zipCount = document.getElementById('bulk-zip-count');
+      if (zipCont && zipCount) {
+        if (doneCount > 0) {
+          zipCont.style.display = 'block';
+          zipCount.textContent = doneCount;
+        } else {
+          zipCont.style.display = 'none';
+        }
+      }
+    }
+
+    function downloadBulkZip() {
+      const taskId = currentTaskId.bulk;
+      if (!taskId) {
+        toast('No active bulk download found', 'error');
+        return;
+      }
+      toast('📦 Preparing ZIP bundle for download...', 'info');
+      const dlLink = document.createElement('a');
+      dlLink.href = `/download-zip/${taskId}`;
+      dlLink.download = `videograb_bundle_${taskId.slice(0, 8)}.zip`;
+      document.body.appendChild(dlLink);
+      dlLink.click();
+      setTimeout(() => {
+        if (document.body.contains(dlLink)) document.body.removeChild(dlLink);
+      }, 600);
     }
 
     async function retryBulkItem(idx) {
